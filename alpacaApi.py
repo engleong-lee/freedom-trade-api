@@ -926,21 +926,6 @@ async def get_position_orders(symbol: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting position orders: {str(e)}")
 
-@app.get("/tracking")
-async def get_all_tracking():
-    """Get all position tracking data"""
-    return {"tracking": position_tracker.get_all_positions()}
-
-@app.get("/tracking/{symbol}")
-async def get_symbol_tracking(symbol: str):
-    """Get tracking data for specific symbol"""
-    tracked = position_tracker.get_position(symbol)
-    if tracked:
-        return {"symbol": symbol, "tracking": tracked}
-    else:
-        return {"symbol": symbol, "tracking": None, "message": "No tracking data found"}
-
-
 @app.get("/allpositions")
 async def get_all_positions():
     try:
@@ -965,37 +950,7 @@ async def get_all_positions():
                 "Change Today": position.change_today if position.change_today else None
             }
             for position in positions
-        ]
-        
-        # # Get current DB positions
-        # current_value_in_positions_table = nocoHelp.getDB('Position Table')
-        # db_symbols = set()
-        # db_id_map = {}  # Symbol -> Id
-
-        # if current_value_in_positions_table and 'list' in current_value_in_positions_table:
-        #     for record in current_value_in_positions_table['list']:
-        #         symbol = record.get('Symbol')
-        #         if symbol:
-        #             db_symbols.add(symbol)
-        #             db_id_map[symbol] = record.get('Id')
-
-        # # Upsert all current positions
-        # result_symbols = set()
-        # for pos in result:
-        #     symbol = pos['Symbol']
-        #     if symbol:
-        #         result_symbols.add(symbol)
-        #         nocoHelp.upsertDB('Position Table', 'Symbol', symbol, pos)
-
-        # # Delete positions in DB that are not in current Alpaca positions
-        # symbols_to_delete = db_symbols - result_symbols
-        # for symbol in symbols_to_delete:
-        #     record_id = db_id_map.get(symbol)
-        #     if record_id:
-        #         delete_payload = {"Id": record_id}
-        #         nocoHelp.deleteRecord('Position Table', delete_payload)
-
-        # print("Current positions in database:", nocoHelp.getDB('Position Table'))
+        ]        
 
         return {"positions": result}
     except Exception as e:
@@ -1005,46 +960,6 @@ async def get_all_positions():
 async def account_info():
     accountInfo = trading_client.get_account()
     return {"getAccount": accountInfo}
-
-
-@app.get("/positions/{symbol}")
-async def get_open_position(symbol: str):
-    try:
-        # Fetch the position by symbol
-        position = trading_client.get_open_position(symbol)
-        
-        # Convert position to dictionary, ensuring all fields are included
-        result = {
-            "asset_id": str(position.asset_id) if position.asset_id else None,
-            "symbol": position.symbol if position.symbol else None,
-            "exchange": str(position.exchange) if position.exchange else None,
-            "asset_class": str(position.asset_class) if position.asset_class else None,
-            "asset_marginable": position.asset_marginable if position.asset_marginable is not None else None,
-            "avg_entry_price": position.avg_entry_price if position.avg_entry_price else None,
-            "qty": position.qty if position.qty else None,
-            "side": str(position.side) if position.side else None,
-            "market_value": position.market_value if position.market_value else None,
-            "cost_basis": position.cost_basis if position.cost_basis else None,
-            "unrealized_pl": position.unrealized_pl if position.unrealized_pl else None,
-            "unrealized_plpc": position.unrealized_plpc if position.unrealized_plpc else None,
-            "unrealized_intraday_pl": position.unrealized_intraday_pl if position.unrealized_intraday_pl else None,
-            "unrealized_intraday_plpc": position.unrealized_intraday_plpc if position.unrealized_intraday_plpc else None,
-            "current_price": position.current_price if position.current_price else None,
-            "lastday_price": position.lastday_price if position.lastday_price else None,
-            "change_today": position.change_today if position.change_today else None,
-            "swap_rate": position.swap_rate if position.swap_rate is not None else None,
-            "avg_entry_swap_rate": position.avg_entry_swap_rate if position.avg_entry_swap_rate is not None else None,
-            "usd": position.usd if position.usd is not None else None,
-            "qty_available": position.qty_available if position.qty_available else None
-        }
-        
-        return result
-    except Exception as e:
-        if e.code == 40410000:
-            return {}
-        else:
-            raise HTTPException(status_code=404, detail=f"No open position found for {symbol}: {str(e)}")    
-    
 
 @app.get("/health")
 async def health_check():
