@@ -864,66 +864,193 @@ async def get_all_positions():
 
 @app.get("/positions/{symbol}/orders")
 async def get_position_orders(symbol: str):
-    """Get all orders for a specific position"""
+    """Get all orders for a specific position including NEW and HELD status"""
     try:
         # Get position info
+        position_exists = False
         try:
             position = trading_client.get_open_position(symbol)
             position_info = {
                 "qty": position.qty,
                 "avg_entry_price": position.avg_entry_price,
                 "market_value": position.market_value,
-                "unrealized_pl": position.unrealized_pl
+                "unrealized_pl": position.unrealized_pl,
+                "current_price": position.current_price
             }
+            position_exists = True
+            logger.info(f"Position exists for {symbol}: {position.qty} shares")
         except:
             position_info = None
         
-        # Get all open orders
-        all_orders = trading_client.get_orders(
-            filter=GetOrdersRequest(
-                status=QueryOrderStatus.OPEN,
-                symbols=[symbol]
+        # Get all orders - fetch using ALL status to include NEW, HELD, and recent FILLED orders
+        relevant_orders = []
+        
+        try:
+            # Use QueryOrderStatus.ALL to get all order statuses
+            all_orders = trading_client.get_orders(
+                filter=GetOrdersRequest(
+                    status=QueryOrderStatus.ALL,
+                    symbols=[symbol],
+                    limit=200  # Increased limit to catch filled orders
+                )
             )
-        )
+            
+            # Filter for NEW, HELD, and optionally FILLED orders (only if position exists)
+            for order in all_orders:
+                order_status = str(order.status).upper()
+                
+                # If no position exists, exclude ALL filled orders (closed trades)
+                if not position_exists and 'FILLED' in order_status:
+                    logger.info(f"Skipping filled order {order.id} as no position exists")
+                    continue
+                
+                # Include NEW and HELD orders always
+                if 'NEW' in order_status or 'HELD' in order_status:
+                    relevant_orders.append(order)
+                    logger.info(f"Found active order: {order.id}, status={order.status}, type={order.order_type}, side={order.side}")
+                # Only include filled orders if we have an active position
+                elif position_exists and 'FILLED' in order_status and 'BUY' in str(order.side).upper():
+                    # Include recently filled buy orders to help identify trade type
+                    relevant_orders.append(order)
+                    logger.info(f"Found filled buy order: {order.id}, status={order.status}")
+            
+            logger.info(f"Total relevant orders found: {len(relevant_orders)}")
+            
+        except Exception as e:
+            logger.error(f"Error fetching orders: {e}")
+            
+            # Fallback: Try with OPEN status for at least NEW orders
+            try:
+                open_orders = trading_client.get_orders(
+                    filter=GetOrdersRequest(
+                        status=QueryOrderStatus.OPEN,
+                        symbols=[symbol]
+                    )
+                )
+                relevant_orders.extend(open_orders)
+                logger.info(f"Fallback: Found {len(open_orders)} OPEN orders")
+            except Exception as e2:
+                logger.error(f"Fallback also failed: {e2}")
         
-        orders_info = []
-        stop_orders = []
-        limit_orders = []
+        # Deduplicate orders based on order ID
+        seen_ids = set()
+        unique_orders = []
+        for order in relevant_orders:
+            if str(order.id) not in seen_ids:
+                seen_ids.add(str(order.id))
+                unique_orders.append(order)
         
-        for order in all_orders:
-            order_data = {
-                "id": str(order.id),
-                "side": str(order.side),
-                "qty": order.qty,
-                "order_type": str(order.order_type),
-                "order_class": str(order.order_class),
-                "status": str(order.status),
-                "stop_price": order.stop_price,
-                "limit_price": order.limit_price,
-                "created_at": str(order.created_at) if order.created_at else None
+        # If no position and no pending orders, return empty result
+        if not position_exists and len(unique_orders) == 0:
+            return {
+                "symbol": symbol,
+                "trade_type": "NONE",
+                "orders": [],
+                "position": None,
+                "order_count": 0,
+                "tracking_data": None,
+                "message": "No active position or pending orders"
             }
+        
+        # Classify orders and determine trade type
+        orders_list = []
+        has_limit_buy = False
+        has_filled_buy = False
+        has_limit_sell = False  
+        has_stop_sell = False
+        has_stop_buy = False
+        
+        for order in unique_orders:
+            # Log order details for debugging
+            logger.info(f"Processing order: {order.id}, side={order.side}, type={order.order_type}, "
+                       f"limit={order.limit_price}, stop={order.stop_price}, status={order.status}")
             
-            orders_info.append(order_data)
+            # Determine order type based on order characteristics
+            order_type = "unknown"
             
-            if order.stop_price is not None:
-                stop_orders.append(order_data)
-            elif order.limit_price is not None and order.stop_price is None:
-                limit_orders.append(order_data)
+            # Get order side and status
+            order_side = str(order.side).upper()
+            order_status = str(order.status).upper()
+            
+            # Check for buy orders (both active and filled)
+            if order.limit_price is not None and order.stop_price is None and 'BUY' in order_side:
+                if 'FILLED' in order_status:
+                    order_type = "buy_filled"
+                    has_filled_buy = True
+                else:
+                    order_type = "buy"
+                    has_limit_buy = True
+            # Limit Sell order (Take Profit)
+            elif order.limit_price is not None and order.stop_price is None and 'SELL' in order_side:
+                order_type = "take_profit"
+                has_limit_sell = True
+            # Stop Sell order (Stop Loss for long)
+            elif order.stop_price is not None and 'SELL' in order_side:
+                order_type = "stop_loss"
+                has_stop_sell = True
+            # Stop Buy order (Stop Loss for short)
+            elif order.stop_price is not None and 'BUY' in order_side:
+                order_type = "stop_loss"
+                has_stop_buy = True
+            
+            # Only include orders that are active (NEW/HELD) or (filled buys ONLY if position exists)
+            if 'NEW' in order_status or 'HELD' in order_status or (order_type == "buy_filled" and position_exists):
+                order_detail = {
+                    "order_details": {
+                        "id": str(order.id),
+                        "side": str(order.side),
+                        "qty": order.qty,
+                        "order_type": str(order.order_type),
+                        "order_class": str(order.order_class) if hasattr(order, 'order_class') else None,
+                        "status": str(order.status),
+                        "stop_price": order.stop_price,
+                        "limit_price": order.limit_price,
+                        "created_at": str(order.created_at) if order.created_at else None,
+                        "submitted_at": str(order.submitted_at) if order.submitted_at else None,
+                        "filled_at": str(order.filled_at) if order.filled_at else None,
+                        "filled_qty": order.filled_qty if hasattr(order, 'filled_qty') else None,
+                        "filled_avg_price": order.filled_avg_price if hasattr(order, 'filled_avg_price') else None
+                    },
+                    "order_type": order_type
+                }
+                
+                orders_list.append(order_detail)
+        
+        # Determine trade type
+        trade_type = "UNKNOWN"
+        
+        # Check if we have an active position or filled buy order
+        has_entry = position_exists or has_filled_buy or has_limit_buy
+        
+        # SWING trade: entry (position or buy order) + stop loss + take profit
+        if has_entry and has_limit_sell and (has_stop_sell or has_stop_buy):
+            trade_type = "SWING"
+        # TREND trade: entry (position or buy order) + stop loss, NO take profit
+        elif has_entry and (has_stop_sell or has_stop_buy) and not has_limit_sell:
+            trade_type = "TREND"
+        # Check for short SWING (for short positions)
+        elif not has_limit_buy and not has_filled_buy and has_limit_sell and has_stop_buy:
+            trade_type = "SWING"
         
         # Get tracking data
         tracked = position_tracker.get_position(symbol)
         
+        # Log summary
+        logger.info(f"Symbol: {symbol}, Trade Type: {trade_type}, Order Count: {len(orders_list)}, "
+                   f"Position Exists: {position_exists}, Has Buy: {has_limit_buy}, "
+                   f"Has Filled Buy: {has_filled_buy}, Has TP: {has_limit_sell}, Has SL: {has_stop_sell or has_stop_buy}")
+        
         return {
             "symbol": symbol,
+            "trade_type": trade_type,
+            "orders": orders_list,
             "position": position_info,
-            "all_orders": orders_info,
-            "stop_orders": stop_orders,
-            "limit_orders": limit_orders,
-            "order_count": len(orders_info),
+            "order_count": len(orders_list),
             "tracking_data": tracked
         }
         
     except Exception as e:
+        logger.error(f"Error getting position orders: {e}")
         raise HTTPException(status_code=500, detail=f"Error getting position orders: {str(e)}")
 
 @app.get("/allpositions")
