@@ -1088,6 +1088,232 @@ async def account_info():
     accountInfo = trading_client.get_account()
     return {"getAccount": accountInfo}
 
+@app.get("/active-trades")
+async def get_all_active_trades():
+    """
+    Get all active trades by finding all NEW/HELD orders and their corresponding positions.
+    This provides a comprehensive view of all active trading activity.
+    """
+    try:
+        # Step 1: Get all orders and filter for NEW and HELD statuses
+        all_active_orders = []
+        distinct_symbols = set()
+        all_orders = []  # Define at the top level
+        
+        # Fetch ALL orders and filter for NEW/HELD status
+        try:
+            all_orders = trading_client.get_orders(
+                filter=GetOrdersRequest(
+                    status=QueryOrderStatus.ALL,
+                    limit=500  # Increase limit to catch all orders
+                )
+            )
+            
+            # Filter for NEW and HELD orders
+            for order in all_orders:
+                order_status = str(order.status).upper()
+                # Check if order status contains NEW or HELD
+                if 'NEW' in order_status or 'HELD' in order_status:
+                    all_active_orders.append(order)
+                    logger.info(f"Found active order: {order.symbol} - {order.id}, status={order.status}, type={order.order_type}")
+            
+            logger.info(f"Found {len(all_active_orders)} active (NEW/HELD) orders out of {len(all_orders)} total orders")
+        except Exception as e:
+            logger.warning(f"Error fetching orders: {e}")
+        
+        # Extract distinct symbols from active orders
+        for order in all_active_orders:
+            distinct_symbols.add(order.symbol)
+        
+        # Also check for recently filled parent orders that have active child orders
+        # This captures cases like OTO/Bracket orders where the entry is filled but stop/profit are active
+        parent_order_ids = set()
+        child_to_parent_map = {}  # Map child orders to their parent IDs
+        
+        for order in all_active_orders:
+            if hasattr(order, 'parent_id') and order.parent_id:
+                parent_order_ids.add(str(order.parent_id))
+                child_to_parent_map[str(order.id)] = str(order.parent_id)
+        
+        # Also check if any active orders are part of OTO/Bracket orders
+        # by looking at their order_class
+        for order in all_active_orders:
+            order_class = str(order.order_class) if hasattr(order, 'order_class') else ''
+            if 'OTO' in order_class or 'BRACKET' in order_class:
+                # This might be a child order of a filled parent
+                # Add logic to find related orders
+                for check_order in all_orders:
+                    if (check_order.symbol == order.symbol and 
+                        str(check_order.order_class) == str(order.order_class) and
+                        str(check_order.id) != str(order.id)):
+                        # Check if this is the parent order (usually the filled buy/sell)
+                        check_status = str(check_order.status).upper()
+                        if 'FILLED' in check_status:
+                            # Check if not already in our list
+                            if not any(str(o.id) == str(check_order.id) for o in all_active_orders):
+                                all_active_orders.append(check_order)
+                                distinct_symbols.add(check_order.symbol)
+                                logger.info(f"Found related filled order: {check_order.symbol} - {check_order.id}")
+        
+        # If we found parent IDs, fetch those filled orders too
+        if parent_order_ids:
+            try:
+                # Check all orders to find the parent orders
+                for order in all_orders:
+                    if str(order.id) in parent_order_ids:
+                        # Add the parent order if it's filled
+                        order_status = str(order.status).upper()
+                        if 'FILLED' in order_status:
+                            # Check if not already in our list
+                            if not any(str(o.id) == str(order.id) for o in all_active_orders):
+                                all_active_orders.append(order)
+                                distinct_symbols.add(order.symbol)
+                                logger.info(f"Found filled parent order: {order.symbol} - {order.id}")
+            except Exception as e:
+                logger.warning(f"Error finding parent orders: {e}")
+        
+        logger.info(f"Found {len(distinct_symbols)} distinct symbols with active orders: {distinct_symbols}")
+        
+        # Step 2: Also get all open positions to ensure we don't miss any
+        try:
+            all_positions = trading_client.get_all_positions()
+            for position in all_positions:
+                distinct_symbols.add(position.symbol)
+            logger.info(f"Added symbols from positions. Total distinct symbols: {len(distinct_symbols)}")
+        except Exception as e:
+            logger.warning(f"Error fetching positions: {e}")
+        
+        # Step 3: For each symbol, get detailed position and order information
+        active_trades = []
+        
+        for symbol in distinct_symbols:
+            try:
+                # Get position info for this symbol
+                position_info = None
+                position_exists = False
+                
+                try:
+                    position = trading_client.get_open_position(symbol)
+                    position_info = {
+                        "qty": position.qty,
+                        "avg_entry_price": position.avg_entry_price,
+                        "market_value": position.market_value,
+                        "unrealized_pl": position.unrealized_pl,
+                        "current_price": position.current_price,
+                        "side": str(position.side) if position.side else None,
+                        "change_today": position.change_today if hasattr(position, 'change_today') else None
+                    }
+                    position_exists = True
+                except:
+                    # No position for this symbol
+                    pass
+                
+                # Get all active orders for this symbol
+                symbol_orders = []
+                has_limit_buy = False
+                has_limit_sell = False
+                has_stop_order = False
+                has_filled_buy = False
+                
+                # Filter orders for this specific symbol
+                for order in all_active_orders:
+                    if order.symbol == symbol:
+                        order_side = str(order.side).upper()
+                        order_status = str(order.status).upper()
+                        
+                        # Determine order type
+                        order_type = "unknown"
+                        
+                        # Check for buy orders (both active and filled)
+                        if order.limit_price is not None and order.stop_price is None and 'BUY' in order_side:
+                            if 'FILLED' in order_status:
+                                order_type = "buy_filled"
+                                has_filled_buy = True
+                            else:
+                                order_type = "buy"
+                                has_limit_buy = True
+                        elif order.limit_price is not None and order.stop_price is None and 'SELL' in order_side:
+                            order_type = "take_profit"
+                            has_limit_sell = True
+                        elif order.stop_price is not None:
+                            order_type = "stop_loss"
+                            has_stop_order = True
+                        
+                        # Include the order in the list
+                        symbol_orders.append({
+                            "order_details": {
+                                "id": str(order.id),
+                                "side": str(order.side),
+                                "qty": order.qty,
+                                "order_type": str(order.order_type),
+                                "order_class": str(order.order_class) if hasattr(order, 'order_class') else None,
+                                "status": str(order.status),
+                                "stop_price": order.stop_price,
+                                "limit_price": order.limit_price,
+                                "created_at": str(order.created_at) if order.created_at else None,
+                                "submitted_at": str(order.submitted_at) if order.submitted_at else None,
+                                "filled_at": str(order.filled_at) if order.filled_at else None,
+                                "filled_qty": order.filled_qty if hasattr(order, 'filled_qty') else None,
+                                "filled_avg_price": order.filled_avg_price if hasattr(order, 'filled_avg_price') else None
+                            },
+                            "order_type": order_type
+                        })
+                
+                # Determine trade type
+                trade_type = "UNKNOWN"
+                has_entry = position_exists or has_limit_buy or has_filled_buy
+                
+                if has_entry and has_limit_sell and has_stop_order:
+                    trade_type = "SWING"
+                elif has_entry and has_stop_order and not has_limit_sell:
+                    trade_type = "TREND"
+                elif position_exists and not symbol_orders:
+                    trade_type = "POSITION_ONLY"
+                elif has_limit_buy and not position_exists:
+                    trade_type = "PENDING_ENTRY"
+                
+                # Get tracking data if available
+                tracked = position_tracker.get_position(symbol) if 'position_tracker' in globals() else None
+                
+                # Only include if there's meaningful activity (position or orders)
+                if position_exists or symbol_orders:
+                    active_trades.append({
+                        "symbol": symbol,
+                        "trade_type": trade_type,
+                        "position": position_info,
+                        "orders": symbol_orders,
+                        "order_count": len(symbol_orders),
+                        "has_position": position_exists,
+                        "tracking_data": tracked
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error processing symbol {symbol}: {e}")
+                continue
+        
+        # Sort by symbol for consistent output
+        active_trades.sort(key=lambda x: x['symbol'])
+        
+        # Summary statistics
+        summary = {
+            "total_symbols": len(active_trades),
+            "positions_count": sum(1 for t in active_trades if t['has_position']),
+            "pending_entries": sum(1 for t in active_trades if t['trade_type'] == 'PENDING_ENTRY'),
+            "swing_trades": sum(1 for t in active_trades if t['trade_type'] == 'SWING'),
+            "trend_trades": sum(1 for t in active_trades if t['trade_type'] == 'TREND'),
+            "total_active_orders": sum(t['order_count'] for t in active_trades)
+        }
+        
+        return {
+            "summary": summary,
+            "active_trades": active_trades,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting all active trades: {e}")
+        raise HTTPException(status_code=500, detail=f"Error getting all active trades: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
