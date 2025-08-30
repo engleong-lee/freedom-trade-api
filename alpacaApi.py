@@ -1261,16 +1261,20 @@ async def get_all_active_trades():
                 
                 # Determine trade type
                 trade_type = "UNKNOWN"
-                has_entry = position_exists or has_limit_buy or has_filled_buy
                 
-                if has_entry and has_limit_sell and has_stop_order:
-                    trade_type = "SWING"
-                elif has_entry and has_stop_order and not has_limit_sell:
-                    trade_type = "TREND"
+                # Check for pending entry first (has buy order but no position)
+                if has_limit_buy and not position_exists:
+                    trade_type = "PENDING_ENTRY"
+                # Position exists without any orders
                 elif position_exists and not symbol_orders:
                     trade_type = "POSITION_ONLY"
-                elif has_limit_buy and not position_exists:
-                    trade_type = "PENDING_ENTRY"
+                # Now check for swing/trend with either position or orders
+                else:
+                    has_entry = position_exists or has_limit_buy or has_filled_buy
+                    if has_entry and has_limit_sell and has_stop_order:
+                        trade_type = "SWING"
+                    elif has_entry and has_stop_order and not has_limit_sell:
+                        trade_type = "TREND"
                 
                 # Get tracking data if available
                 tracked = position_tracker.get_position(symbol) if 'position_tracker' in globals() else None
