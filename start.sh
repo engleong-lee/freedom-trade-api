@@ -1,1 +1,1 @@
-python -m uvicorn alpacaApi:app --reload
+python -m uvicorn alpacaApi:app --host 0.0.0.0 --reload
