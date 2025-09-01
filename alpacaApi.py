@@ -864,7 +864,7 @@ async def get_all_positions():
 
 @app.get("/positions/{symbol}/orders")
 async def get_position_orders(symbol: str):
-    """Get all orders for a specific position including NEW and HELD status"""
+    """Get all orders for a specific position including NEW, HELD, PENDING_CANCEL, and PENDING_REPLACE status"""
     try:
         # Get position info
         position_exists = False
@@ -882,7 +882,7 @@ async def get_position_orders(symbol: str):
         except:
             position_info = None
         
-        # Get all orders - fetch using ALL status to include NEW, HELD, and recent FILLED orders
+        # Get all orders - fetch using ALL status to include NEW, HELD, PENDING_CANCEL, PENDING_REPLACE, and recent FILLED orders
         relevant_orders = []
         
         try:
@@ -895,7 +895,7 @@ async def get_position_orders(symbol: str):
                 )
             )
             
-            # Filter for NEW, HELD, and optionally FILLED orders (only if position exists)
+            # Filter for NEW, HELD, PENDING_CANCEL, PENDING_REPLACE, and optionally FILLED orders (only if position exists)
             for order in all_orders:
                 order_status = str(order.status).upper()
                 
@@ -904,8 +904,9 @@ async def get_position_orders(symbol: str):
                     logger.info(f"Skipping filled order {order.id} as no position exists")
                     continue
                 
-                # Include NEW and HELD orders always
-                if 'NEW' in order_status or 'HELD' in order_status:
+                # Include NEW, HELD, PENDING_CANCEL, and PENDING_REPLACE orders always
+                if ('NEW' in order_status or 'HELD' in order_status or 
+                    'PENDING_CANCEL' in order_status or 'PENDING_REPLACE' in order_status):
                     relevant_orders.append(order)
                     logger.info(f"Found active order: {order.id}, status={order.status}, type={order.order_type}, side={order.side}")
                 # Only include filled orders if we have an active position
@@ -993,8 +994,10 @@ async def get_position_orders(symbol: str):
                 order_type = "stop_loss"
                 has_stop_buy = True
             
-            # Only include orders that are active (NEW/HELD) or (filled buys ONLY if position exists)
-            if 'NEW' in order_status or 'HELD' in order_status or (order_type == "buy_filled" and position_exists):
+            # Only include orders that are active (NEW/HELD/PENDING_CANCEL/PENDING_REPLACE) or (filled buys ONLY if position exists)
+            if ('NEW' in order_status or 'HELD' in order_status or 
+                'PENDING_CANCEL' in order_status or 'PENDING_REPLACE' in order_status or 
+                (order_type == "buy_filled" and position_exists)):
                 order_detail = {
                     "order_details": {
                         "id": str(order.id),
@@ -1091,7 +1094,7 @@ async def account_info():
 @app.get("/active-trades")
 async def get_all_active_trades():
     """
-    Get all active trades by finding all NEW/HELD orders and their corresponding positions.
+    Get all active trades by finding all NEW/HELD/PENDING_CANCEL/PENDING_REPLACE orders and their corresponding positions.
     This provides a comprehensive view of all active trading activity.
     """
     try:
@@ -1109,15 +1112,16 @@ async def get_all_active_trades():
                 )
             )
             
-            # Filter for NEW and HELD orders
+            # Filter for NEW, HELD, PENDING_CANCEL, and PENDING_REPLACE orders
             for order in all_orders:
                 order_status = str(order.status).upper()
-                # Check if order status contains NEW or HELD
-                if 'NEW' in order_status or 'HELD' in order_status:
+                # Check if order status contains NEW, HELD, PENDING_CANCEL, or PENDING_REPLACE
+                if ('NEW' in order_status or 'HELD' in order_status or 
+                    'PENDING_CANCEL' in order_status or 'PENDING_REPLACE' in order_status):
                     all_active_orders.append(order)
                     logger.info(f"Found active order: {order.symbol} - {order.id}, status={order.status}, type={order.order_type}")
             
-            logger.info(f"Found {len(all_active_orders)} active (NEW/HELD) orders out of {len(all_orders)} total orders")
+            logger.info(f"Found {len(all_active_orders)} active (NEW/HELD/PENDING_CANCEL/PENDING_REPLACE) orders out of {len(all_orders)} total orders")
         except Exception as e:
             logger.warning(f"Error fetching orders: {e}")
         
