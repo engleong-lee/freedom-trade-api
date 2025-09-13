@@ -1267,18 +1267,22 @@ async def get_all_active_trades():
                 trade_type = "UNKNOWN"
                 
                 # Check for pending entry first (has buy order but no position)
+                # This takes priority even if stop/take profit orders exist (bracket/OTO orders)
                 if has_limit_buy and not position_exists:
                     trade_type = "PENDING_ENTRY"
                 # Position exists without any orders
                 elif position_exists and not symbol_orders:
                     trade_type = "POSITION_ONLY"
-                # Now check for swing/trend with either position or orders
-                else:
-                    has_entry = position_exists or has_limit_buy or has_filled_buy
-                    if has_entry and has_limit_sell and has_stop_order:
+                # Now check for swing/trend only if position exists or buy is filled
+                elif position_exists or has_filled_buy:
+                    # Only classify as SWING/TREND if we have an actual position
+                    if has_limit_sell and has_stop_order:
                         trade_type = "SWING"
-                    elif has_entry and has_stop_order and not has_limit_sell:
+                    elif has_stop_order and not has_limit_sell:
                         trade_type = "TREND"
+                # Orphaned orders without position or pending entry
+                elif symbol_orders and not position_exists and not has_limit_buy:
+                    trade_type = "ORPHANED_ORDERS"
                 
                 # Get tracking data if available
                 tracked = position_tracker.get_position(symbol) if 'position_tracker' in globals() else None
